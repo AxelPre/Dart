@@ -17,24 +17,23 @@ STATS_PLAYERS = [
 CLOCK_TARGETS = list(range(1, 21)) + [25, 50]
 STATS_HEADER = """# Dart Score stats format
 # 501: YYYY-MM-DD HH:MM;501;score_per_round;D<double_attempts>;C<checkout_darts>|F
-# Klockan: YYYY-MM-DD HH:MM;klockan;dart_sequence_per_round;C|F
-# Klockan rounds use 0/1 per dart, e.g. 111,010,001
-# D = dubbelförsök
+# Clock: YYYY-MM-DD HH:MM;clock;dart_sequence_per_round;C|F
+# Clock rounds use 0/1 per dart, e.g. 111,010,001
+# Superclock: YYYY-MM-DD HH:MM;superclock;dart_sequence_per_round;C|F
+# Superclock rounds use 0/1/2/3 per dart, e.g. 020,103,11
+# D = double attempts
 """
 
 
 def load_checkout_suggestions():
-    checkout_file = next(
-        path for path in Path(__file__).resolve().parent.iterdir()
-        if path.name.lower().startswith("utg") and path.suffix == ".py"
-    )
-    spec = importlib.util.spec_from_file_location("utgangar", checkout_file)
+    checkout_file = Path(__file__).resolve().parent / "checkouts.py"
+    spec = importlib.util.spec_from_file_location("checkouts", checkout_file)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return dict(module.UTGANGAR)
+    return dict(module.CHECKOUTS)
 
 
-UTGANGAR = load_checkout_suggestions()
+CHECKOUTS = load_checkout_suggestions()
 
 # ---------- Safe math ----------
 OPS = {
@@ -101,9 +100,9 @@ def game_over_summary(game, selected_game, final_darts):
 
     if selected_game == "501":
         average = game.start_score / total_darts * 3 if total_darts else 0
-        return f"{total_darts} pilar  Snitt: {average:.2f}"
+        return f"{total_darts} darts  Average: {average:.2f}"
 
-    return f"{total_darts} pilar"
+    return f"{total_darts} darts"
 
 
 def percent(hits, attempts):
@@ -146,6 +145,100 @@ def exact_clock_segments(rounds):
         "twenty_five_hits": twenty_five_hits,
         "bull_attempts": bull_attempts,
         "bull_hits": bull_hits,
+    }
+
+
+def exact_superclock_segments(rounds):
+    darts = "".join(rounds)
+    segment_attempts = 0
+    segment_hits = 0
+    twenty_five_attempts = 0
+    twenty_five_hits = 0
+    bull_attempts = 0
+    bull_hits = 0
+    target_index = 0
+
+    for dart in darts:
+        value = int(dart)
+
+        if target_index < 20:
+            segment_attempts += 1
+            if value:
+                segment_hits += 1
+                target_index = min(21, target_index + value)
+        elif target_index == 20:
+            if value > 1:
+                return None
+            twenty_five_attempts += 1
+            if value == 1:
+                twenty_five_hits += 1
+                target_index = 21
+        elif target_index == 21:
+            if value > 1:
+                return None
+            bull_attempts += 1
+            if value == 1:
+                bull_hits += 1
+                target_index = len(CLOCK_TARGETS)
+        else:
+            break
+
+    return {
+        "segment_attempts": segment_attempts,
+        "segment_hits": segment_hits,
+        "twenty_five_attempts": twenty_five_attempts,
+        "twenty_five_hits": twenty_five_hits,
+        "bull_attempts": bull_attempts,
+        "bull_hits": bull_hits,
+    }
+
+
+def aggregate_clock_stats(legs):
+    wins = [leg for leg in legs if leg["completed"]]
+    segment_attempts = sum(
+        leg["segment_stats"]["segment_attempts"]
+        for leg in legs
+        if leg["segment_stats"]
+    )
+    segment_hits = sum(
+        leg["segment_stats"]["segment_hits"]
+        for leg in legs
+        if leg["segment_stats"]
+    )
+    twenty_five_attempts = sum(
+        leg["segment_stats"]["twenty_five_attempts"]
+        for leg in legs
+        if leg["segment_stats"]
+    )
+    twenty_five_hits = sum(
+        leg["segment_stats"]["twenty_five_hits"]
+        for leg in legs
+        if leg["segment_stats"]
+    )
+    bull_attempts = sum(
+        leg["segment_stats"]["bull_attempts"]
+        for leg in legs
+        if leg["segment_stats"]
+    )
+    bull_hits = sum(
+        leg["segment_stats"]["bull_hits"]
+        for leg in legs
+        if leg["segment_stats"]
+    )
+
+    return {
+        "legs": len(legs),
+        "wins": len(wins),
+        "losses": len(legs) - len(wins),
+        "win_percent": len(wins) / len(legs) * 100 if legs else 0,
+        "average_darts": (
+            sum(leg["darts"] for leg in wins) / len(wins)
+            if wins else 0
+        ),
+        "best": min((leg["darts"] for leg in wins), default=0),
+        "segment_percent": percent(segment_hits, segment_attempts),
+        "twenty_five_percent": percent(twenty_five_hits, twenty_five_attempts),
+        "bull_percent": percent(bull_hits, bull_attempts),
     }
 
 
@@ -205,18 +298,18 @@ class DartGame:
         name, stats_file = PLAYER_IDENTITIES[code]
 
         if any(player.stats_file == stats_file for player in self.players):
-            return f"{name} är redan markerad"
+            return f"{name} is already assigned"
 
         player = self.current_player()
         player.name = name
         player.stats_file = stats_file
-        return f"Spelare markerad som {name}"
+        return f"Player assigned as {name}"
 
     def add_score(self, points, double_attempts=None):
         player = self.current_player()
 
         if not self.is_legal_move(points):
-            return "Ogiltigt kast"
+            return "Invalid throw"
 
         old_score = player.score
         old_player = self.current
@@ -243,7 +336,7 @@ class DartGame:
 
         if player.score == 0:
             self.winner_index = old_player
-            return f"{player.name} vann!"
+            return f"{player.name} won!"
 
         self.next_player()
         return f"{player.name}: {points}"
@@ -258,7 +351,7 @@ class DartGame:
         self.players[player_index].double_attempts.pop()
         self.current = player_index
         self.winner_index = None
-        return f"Ångrade {points}"
+        return f"Undid {points}"
 
     def save_completed_leg(self, checkout_darts):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -276,8 +369,9 @@ class DartGame:
 
 
 class ClockGame:
-    def __init__(self, names):
+    def __init__(self, names, stats_game_type="clock"):
         self.players = [Player(name, 0) for name in names]
+        self.stats_game_type = stats_game_type
         self.current = 0
         self.history = []
         self.winner_index = None
@@ -288,7 +382,7 @@ class ClockGame:
     def current_target(self, player=None):
         player = player or self.current_player()
         if player.clock_index >= len(CLOCK_TARGETS):
-            return "klar"
+            return "done"
         return CLOCK_TARGETS[player.clock_index]
 
     def next_player(self):
@@ -298,16 +392,16 @@ class ClockGame:
         name, stats_file = PLAYER_IDENTITIES[code]
 
         if any(player.stats_file == stats_file for player in self.players):
-            return f"{name} är redan markerad"
+            return f"{name} is already assigned"
 
         player = self.current_player()
         player.name = name
         player.stats_file = stats_file
-        return f"Spelare markerad som {name}"
+        return f"Player assigned as {name}"
 
     def add_hits(self, hits):
         if hits < 0 or hits > 3:
-            return "Tryck 0, 1, 2 eller 3"
+            return "Press 0, 1, 2 or 3"
 
         player = self.current_player()
         old_index = player.clock_index
@@ -320,14 +414,14 @@ class ClockGame:
 
         if player.clock_index == len(CLOCK_TARGETS):
             self.winner_index = old_player
-            return f"{player.name} vann!"
+            return f"{player.name} won!"
 
         self.next_player()
-        return f"{player.name}: {hits} träff"
+        return f"{player.name}: {hits} hit"
 
     def add_dart_sequence(self, sequence):
         if not sequence or len(sequence) > 3 or any(dart not in "01" for dart in sequence):
-            return "Skriv 0/1 för varje pil"
+            return "Enter 0/1 for each dart"
 
         player = self.current_player()
         old_index = player.clock_index
@@ -345,7 +439,7 @@ class ClockGame:
 
         if not finished and len(sequence) != 3:
             player.clock_index = old_index
-            return "Skriv 3 pilar"
+            return "Enter 3 darts"
 
         hits = player.clock_index - old_index
         player.throws.append(hits)
@@ -354,10 +448,10 @@ class ClockGame:
 
         if finished:
             self.winner_index = old_player
-            return f"{player.name} vann!"
+            return f"{player.name} won!"
 
         self.next_player()
-        return f"{player.name}: {hits} träff"
+        return f"{player.name}: {hits} hit"
 
     def undo(self):
         if not self.history:
@@ -369,7 +463,7 @@ class ClockGame:
         self.players[player_index].clock_darts.pop()
         self.current = player_index
         self.winner_index = None
-        return f"Ångrade {hits}"
+        return f"Undid {hits}"
 
     def save_completed_leg(self, final_darts):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -381,17 +475,78 @@ class ClockGame:
             throws = ",".join(player.clock_darts)
             result = "C" if player_index == self.winner_index else "F"
             if result == "C":
-                line = f"{timestamp};klockan;{throws};C\n"
+                line = f"{timestamp};{self.stats_game_type};{throws};C\n"
             else:
-                line = f"{timestamp};klockan;{throws};F\n"
+                line = f"{timestamp};{self.stats_game_type};{throws};F\n"
 
             append_stats_line(player.stats_file, line)
+
+
+class SuperClockGame(ClockGame):
+    def __init__(self, names):
+        super().__init__(names, stats_game_type="superclock")
+
+    def add_hits(self, hits):
+        return self.add_dart_sequence(str(hits))
+
+    def add_dart_sequence(self, sequence):
+        if not sequence or len(sequence) > 3 or any(dart not in "0123" for dart in sequence):
+            return "Enter 0/1/2/3 for each dart"
+
+        player = self.current_player()
+        old_index = player.clock_index
+        old_player = self.current
+        finished = False
+        used_sequence = ""
+
+        for dart in sequence:
+            value = int(dart)
+            used_sequence += dart
+
+            if player.clock_index >= len(CLOCK_TARGETS):
+                finished = True
+                break
+
+            target = self.current_target(player)
+            if target in (25, 50) and value > 1:
+                player.clock_index = old_index
+                return "25 and bull only accept 0/1"
+
+            if value == 0:
+                continue
+
+            if target == 50:
+                player.clock_index = len(CLOCK_TARGETS)
+                finished = True
+                break
+
+            if target == 25:
+                player.clock_index = 21
+            else:
+                player.clock_index = min(21, player.clock_index + value)
+
+        if not finished and len(sequence) != 3:
+            player.clock_index = old_index
+            return "Enter 3 darts"
+
+        hits = player.clock_index - old_index
+        player.throws.append(hits)
+        player.clock_darts.append(used_sequence)
+        self.history.append((old_player, old_index, hits, used_sequence))
+
+        if finished:
+            self.winner_index = old_player
+            return f"{player.name} won!"
+
+        self.next_player()
+        return f"{player.name}: {hits} hit"
 
 
 def load_player_stats(stats_filename):
     stats_path = Path(__file__).resolve().parent / stats_filename
     legs_501 = []
     clock_legs = []
+    superclock_legs = []
 
     try:
         lines = stats_path.read_text(encoding="utf-8").splitlines()
@@ -406,25 +561,35 @@ def load_player_stats(stats_filename):
             parts = line.split(";")
             game_type = parts[1]
 
-            if game_type == "klockan":
+            if game_type in {"clock", "superclock"}:
                 rounds = [value for value in parts[2].split(",") if value]
                 result = parts[3]
 
                 if result not in {"C", "F"}:
                     continue
 
-                if any(set(round_value) - {"0", "1"} for round_value in rounds):
+                allowed_darts = {"0", "1"} if game_type == "clock" else {"0", "1", "2", "3"}
+                if any(set(round_value) - allowed_darts for round_value in rounds):
                     continue
 
                 darts = sum(len(round_value) for round_value in rounds)
-                segment_stats = exact_clock_segments(rounds)
+                if game_type == "clock":
+                    segment_stats = exact_clock_segments(rounds)
+                else:
+                    segment_stats = exact_superclock_segments(rounds)
+                    if segment_stats is None:
+                        continue
 
-                clock_legs.append({
+                leg = {
                     "rounds": rounds,
                     "darts": darts,
                     "completed": result == "C",
                     "segment_stats": segment_stats,
-                })
+                }
+                if game_type == "clock":
+                    clock_legs.append(leg)
+                else:
+                    superclock_legs.append(leg)
             else:
                 start_score = int(game_type)
                 throws = [int(points) for points in parts[2].split(",") if points]
@@ -456,37 +621,8 @@ def load_player_stats(stats_filename):
     total_darts = sum(leg["darts"] for leg in legs_501)
     total_double_attempts = sum(leg["double_attempts"] for leg in legs_501)
     checkouts = [leg["throws"][-1] for leg in wins if leg["throws"]]
-    clock_wins = [leg for leg in clock_legs if leg["completed"]]
-    clock_segment_attempts = sum(
-        leg["segment_stats"]["segment_attempts"]
-        for leg in clock_legs
-        if leg["segment_stats"]
-    )
-    clock_segment_hits = sum(
-        leg["segment_stats"]["segment_hits"]
-        for leg in clock_legs
-        if leg["segment_stats"]
-    )
-    clock_25_attempts = sum(
-        leg["segment_stats"]["twenty_five_attempts"]
-        for leg in clock_legs
-        if leg["segment_stats"]
-    )
-    clock_25_hits = sum(
-        leg["segment_stats"]["twenty_five_hits"]
-        for leg in clock_legs
-        if leg["segment_stats"]
-    )
-    clock_bull_attempts = sum(
-        leg["segment_stats"]["bull_attempts"]
-        for leg in clock_legs
-        if leg["segment_stats"]
-    )
-    clock_bull_hits = sum(
-        leg["segment_stats"]["bull_hits"]
-        for leg in clock_legs
-        if leg["segment_stats"]
-    )
+    clock_stats = aggregate_clock_stats(clock_legs)
+    superclock_stats = aggregate_clock_stats(superclock_legs)
 
     return {
         "legs": len(legs_501),
@@ -506,18 +642,24 @@ def load_player_stats(stats_filename):
             leg["start_score"] == 501 and leg["darts"] == 9
             for leg in wins
         ),
-        "clock_legs": len(clock_legs),
-        "clock_wins": len(clock_wins),
-        "clock_losses": len(clock_legs) - len(clock_wins),
-        "clock_win_percent": len(clock_wins) / len(clock_legs) * 100 if clock_legs else 0,
-        "clock_average_darts": (
-            sum(leg["darts"] for leg in clock_wins) / len(clock_wins)
-            if clock_wins else 0
-        ),
-        "clock_best": min((leg["darts"] for leg in clock_wins), default=0),
-        "clock_segment_percent": percent(clock_segment_hits, clock_segment_attempts),
-        "clock_25_percent": percent(clock_25_hits, clock_25_attempts),
-        "clock_bull_percent": percent(clock_bull_hits, clock_bull_attempts),
+        "clock_legs": clock_stats["legs"],
+        "clock_wins": clock_stats["wins"],
+        "clock_losses": clock_stats["losses"],
+        "clock_win_percent": clock_stats["win_percent"],
+        "clock_average_darts": clock_stats["average_darts"],
+        "clock_best": clock_stats["best"],
+        "clock_segment_percent": clock_stats["segment_percent"],
+        "clock_25_percent": clock_stats["twenty_five_percent"],
+        "clock_bull_percent": clock_stats["bull_percent"],
+        "superclock_legs": superclock_stats["legs"],
+        "superclock_wins": superclock_stats["wins"],
+        "superclock_losses": superclock_stats["losses"],
+        "superclock_win_percent": superclock_stats["win_percent"],
+        "superclock_average_darts": superclock_stats["average_darts"],
+        "superclock_best": superclock_stats["best"],
+        "superclock_segment_percent": superclock_stats["segment_percent"],
+        "superclock_25_percent": superclock_stats["twenty_five_percent"],
+        "superclock_bull_percent": superclock_stats["bull_percent"],
     }
 
 
@@ -591,8 +733,10 @@ while running:
                     names = [f"P{i + 1}" for i in range(player_count)]
                     if selected_game == "501":
                         game = DartGame(names, start_score=501)
-                    elif selected_game == "klockan":
+                    elif selected_game == "clock":
                         game = ClockGame(names)
+                    elif selected_game == "superclock":
+                        game = SuperClockGame(names)
                     current_input = ""
                     message = ""
                     state = STATE_PLAYING
@@ -603,10 +747,14 @@ while running:
                     state = STATE_PLAYER_COUNT
 
                 elif event.unicode == "2":
-                    selected_game = "klockan"
+                    selected_game = "clock"
                     state = STATE_PLAYER_COUNT
 
                 elif event.unicode == "3":
+                    selected_game = "superclock"
+                    state = STATE_PLAYER_COUNT
+
+                elif event.unicode == "4":
                     stats_player_index = 0
                     stats_data = load_player_stats(STATS_PLAYERS[stats_player_index][1])
                     state = STATE_STATS
@@ -638,7 +786,7 @@ while running:
                             if selected_game == "501":
                                 points, double_attempts = parse_score_input(submitted_input)
                                 message = game.add_score(points, double_attempts)
-                            elif selected_game == "klockan":
+                            elif selected_game == "clock":
                                 if game.current_player().stats_file:
                                     message = game.add_dart_sequence(submitted_input)
                                 else:
@@ -646,16 +794,21 @@ while running:
                                         raise ValueError("Clock hits must be 0, 1, 2 or 3")
 
                                     message = game.add_hits(int(submitted_input))
+                            elif selected_game == "superclock":
+                                message = game.add_dart_sequence(submitted_input)
 
-                            if "vann" in message:
-                                if selected_game == "klockan" and game.current_player().stats_file:
+                            if "won" in message:
+                                if (
+                                    selected_game == "superclock"
+                                    or (selected_game == "clock" and game.current_player().stats_file)
+                                ):
                                     checkout_darts = len(game.current_player().clock_darts[-1])
                                     state = STATE_GAME_OVER
                                 else:
                                     state = STATE_CHECKOUT_DARTS
 
                         except Exception:
-                            message = "Fel input"
+                            message = "Invalid input"
 
                     current_input = ""
 
@@ -671,7 +824,10 @@ while running:
 
             elif state == STATE_GAME_OVER:
                 if event.key == pygame.K_BACKSPACE:
-                    if selected_game == "klockan" and game.players[game.winner_index].stats_file:
+                    if (
+                        selected_game == "superclock"
+                        or (selected_game == "clock" and game.players[game.winner_index].stats_file)
+                    ):
                         message = game.undo()
                         checkout_darts = None
                         state = STATE_PLAYING
@@ -684,7 +840,7 @@ while running:
                         game.save_completed_leg(checkout_darts)
                         reset_to_start()
                     except OSError:
-                        message = "Kunde inte spara statistik"
+                        message = "Could not save stats"
 
             if state_before_keydown == STATE_PLAYING:
                 if event.unicode in "0123456789+-*/.,":
@@ -695,54 +851,63 @@ while running:
 
     if state == STATE_START:
         title = big_font.render("DART", True, (255, 255, 255))
-        hint = medium_font.render("Enter för att börja", True, (200, 200, 200))
+        hint = medium_font.render("Press Enter to start", True, (200, 200, 200))
 
         screen.blit(title, (345, 150))
         screen.blit(hint, (300, 330))
 
     elif state == STATE_PLAYER_COUNT:
-        title = medium_font.render("Hur många spelare?", True, (255, 255, 255))
-        hint = medium_font.render("Tryck 1-9", True, (200, 200, 200))
+        title = medium_font.render("How many players?", True, (255, 255, 255))
+        hint = medium_font.render("Press 1-9", True, (200, 200, 200))
 
         screen.blit(title, (300, 210))
         screen.blit(hint, (380, 290))
 
     elif state == STATE_GAME_SELECT:
-        title = medium_font.render("Välj", True, (255, 255, 255))
+        title = medium_font.render("Select", True, (255, 255, 255))
         option1 = medium_font.render("1. 501", True, (200, 255, 200))
-        option2 = medium_font.render("2. Klockan", True, (200, 255, 200))
-        option3 = medium_font.render("3. Stats", True, (180, 220, 255))
+        option2 = medium_font.render("2. Clock", True, (200, 255, 200))
+        option3 = medium_font.render("3. Superclock", True, (200, 255, 200))
+        option4 = medium_font.render("4. Stats", True, (180, 220, 255))
 
         screen.blit(title, (380, 150))
         screen.blit(option1, (380, 250))
         screen.blit(option2, (380, 320))
         screen.blit(option3, (380, 390))
+        screen.blit(option4, (380, 460))
 
     elif state == STATE_STATS:
         stats_player_name = STATS_PLAYERS[stats_player_index][0]
-        title = medium_font.render(f"{stats_player_name}s statistik", True, (255, 255, 255))
+        title = medium_font.render(f"{stats_player_name}'s stats", True, (255, 255, 255))
         screen.blit(title, (335, 35))
 
         left_stats = [
             ("501", ""),
-            ("Spelade legs", stats_data["legs"]),
-            ("3-pilssnitt", f'{stats_data["three_dart_average"]:.2f}'),
-            ("Bästa leg", f'{stats_data["best_leg"]} pilar' if stats_data["best_leg"] else "-"),
+            ("Played legs", stats_data["legs"]),
+            ("3-dart average", f'{stats_data["three_dart_average"]:.2f}'),
+            ("Best leg", f'{stats_data["best_leg"]} darts' if stats_data["best_leg"] else "-"),
             ("Checkout", f'{stats_data["checkout_percent"]:.1f}%'),
             ("100+ / 140+", f'{stats_data["score_100_plus"]}/{stats_data["score_140_plus"]}'),
             ("180", stats_data["score_180"]),
-            ("100+ utgångar", stats_data["checkout_100_plus"]),
-            ("Högsta utgång", stats_data["highest_checkout"] or "-"),
-            ("9-pilare", stats_data["nine_darters"]),
+            ("100+ checkouts", stats_data["checkout_100_plus"]),
+            ("Highest checkout", stats_data["highest_checkout"] or "-"),
+            ("9-darters", stats_data["nine_darters"]),
         ]
         right_stats = [
-            ("Klockan", ""),
-            ("Spelade", stats_data["clock_legs"]),
-            ("Snitt pilar", f'{stats_data["clock_average_darts"]:.1f}' if stats_data["clock_average_darts"] else "-"),
-            ("Bästa klocka", f'{stats_data["clock_best"]} pilar' if stats_data["clock_best"] else "-"),
-            ("1-20 träff", f'{stats_data["clock_segment_percent"]:.1f}%'),
-            ("25 träff", f'{stats_data["clock_25_percent"]:.1f}%'),
-            ("BULL träff", f'{stats_data["clock_bull_percent"]:.1f}%'),
+            ("Clock", ""),
+            ("Played", stats_data["clock_legs"]),
+            ("Average darts", f'{stats_data["clock_average_darts"]:.1f}' if stats_data["clock_average_darts"] else "-"),
+            ("Best clock", f'{stats_data["clock_best"]} darts' if stats_data["clock_best"] else "-"),
+            ("1-20 hit", f'{stats_data["clock_segment_percent"]:.1f}%'),
+            ("25 hit", f'{stats_data["clock_25_percent"]:.1f}%'),
+            ("BULL hit", f'{stats_data["clock_bull_percent"]:.1f}%'),
+            ("Superclock", ""),
+            ("Played", stats_data["superclock_legs"]),
+            ("Average darts", f'{stats_data["superclock_average_darts"]:.1f}' if stats_data["superclock_average_darts"] else "-"),
+            ("Best super", f'{stats_data["superclock_best"]} darts' if stats_data["superclock_best"] else "-"),
+            ("1-20 hit", f'{stats_data["superclock_segment_percent"]:.1f}%'),
+            ("25 hit", f'{stats_data["superclock_25_percent"]:.1f}%'),
+            ("BULL hit", f'{stats_data["superclock_bull_percent"]:.1f}%'),
         ]
 
         for column_x, rows in ((80, left_stats), (540, right_stats)):
@@ -754,9 +919,9 @@ while running:
                 value_text = small_font.render(str(value), True, (220, 255, 220))
                 screen.blit(label_text, (column_x, y))
                 screen.blit(value_text, (column_x + 255, y))
-                y += 37
+                y += 31
 
-        hint = small_font.render("Enter byter spelare, Backspace till meny, Esc till start", True, (180, 180, 180))
+        hint = small_font.render("Enter changes player, Backspace to menu, Esc to start", True, (180, 180, 180))
         screen.blit(hint, (205, 555))
 
     elif state == STATE_PLAYING:
@@ -786,21 +951,23 @@ while running:
 
             suggestion_box = pygame.Rect(705, 20, 270, 135)
             pygame.draw.rect(screen, (45, 45, 45), suggestion_box)
-            suggestion_title = small_font.render("Föreslaget kast", True, (220, 220, 220))
+            suggestion_title = small_font.render("Suggested throw", True, (220, 220, 220))
             screen.blit(suggestion_title, (725, 35))
 
             suggested_score = suggestion_score(player.score, current_input)
-            routes = UTGANGAR.get(suggested_score, ()) if suggested_score is not None else ()
+            routes = CHECKOUTS.get(suggested_score, ()) if suggested_score is not None else ()
             if routes:
                 for route_index, route in enumerate(routes[:2]):
                     route_text = small_font.render(format_route(route), True, (200, 255, 200))
                     screen.blit(route_text, (725, 75 + route_index * 35))
         else:
-            target_text = medium_font.render(f"Du är på: {game.current_target()}", True, (255, 255, 255))
+            target_text = medium_font.render(f"Target: {game.current_target()}", True, (255, 255, 255))
             if player.stats_file:
-                clock_hint = "Skriv 0/1 för varje pil"
+                clock_hint = "Enter 0/1 for each dart"
             else:
-                clock_hint = "Tryck 0-3 för antal träffar"
+                clock_hint = "Press 0-3 for hit count"
+            if selected_game == "superclock":
+                clock_hint = "Enter 0/1/2/3 for each dart"
             hint_text = small_font.render(clock_hint, True, (200, 200, 200))
             screen.blit(target_text, (360, 170))
             screen.blit(hint_text, (360, 250))
@@ -812,12 +979,12 @@ while running:
         screen.blit(msg_text, (320, 440))
     elif state == STATE_CHECKOUT_DARTS:
         if selected_game == "501":
-            prompt = "Hur många pilar vid utgång?"
+            prompt = "How many darts for checkout?"
         else:
-            prompt = "Hur många pilar kastades?"
+            prompt = "How many darts were thrown?"
 
         title = medium_font.render(prompt, True, (255, 255, 255))
-        hint = medium_font.render("Tryck 1, 2 eller 3", True, (200, 200, 200))
+        hint = medium_font.render("Press 1, 2 or 3", True, (200, 200, 200))
 
         screen.blit(title, (220, 220))  
         screen.blit(hint, (320, 310))
@@ -825,7 +992,7 @@ while running:
     elif state == STATE_GAME_OVER:
         title = medium_font.render(message, True, (255, 255, 255))
         extra = medium_font.render(game_over_summary(game, selected_game, checkout_darts), True, (200, 255, 200))
-        hint = medium_font.render("Enter sparar, Backspace ändrar", True, (200, 200, 200))
+        hint = medium_font.render("Enter saves, Backspace edits", True, (200, 200, 200))
 
         screen.blit(title, (330, 190))
         screen.blit(extra, (330, 270))
