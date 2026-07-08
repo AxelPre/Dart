@@ -1,0 +1,7 @@
+# Dart Score stats format
+# 501: YYYY-MM-DD HH:MM;501;score_per_round;D<double_attempts>;C<checkout_darts>|F
+# Klockan: YYYY-MM-DD HH:MM;klockan;dart_sequence_per_round;C|F
+# Klockan rounds use 0/1 per dart, e.g. 111,010,001
+# D = dubbelförsök
+
+2026-06-14 22:10;501;85,41,58,66,26,28,85,83,29;D2;C3
