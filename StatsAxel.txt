@@ -1,9 +1,10 @@
 # Dart Score stats format
-# 501: YYYY-MM-DD HH:MM;501;score_per_round;D<double_attempts>;C<checkout_darts>|F
+# x01: YYYY-MM-DD HH:MM;501|301;score_per_round;D<double_attempts>;C<checkout_darts>|F
 # Clock: YYYY-MM-DD HH:MM;clock;dart_sequence_per_round;C|F
 # Clock rounds use 0/1 per dart, e.g. 111,010,001
 # Superclock: YYYY-MM-DD HH:MM;superclock;dart_sequence_per_round;C|F
 # Superclock rounds use 0/1/2/3 per dart, e.g. 020,103,11
+# Checkout run: YYYY-MM-DD HH:MM;checkout121|checkout61;best_run
 # D = double attempts
 
 2026-06-14 22:10;501;85,41,58,66,26,28,85,83,29;D2;C3
