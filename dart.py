@@ -17,12 +17,17 @@ STATS_PLAYERS = [
 CLOCK_TARGETS = list(range(1, 21)) + [25, 50]
 X01_GAMES = {"501", "301"}
 CHECKOUT_RUN_GAMES = {"checkout121", "checkout61"}
+BULLGAME = "bullgame"
 STATS_HEADER = """# Dart Score stats format
 # x01: YYYY-MM-DD HH:MM;501|301;score_per_round;D<double_attempts>;C<checkout_darts>|F
 # Clock: YYYY-MM-DD HH:MM;clock;dart_sequence_per_round;C|F
 # Clock rounds use 0/1 per dart, e.g. 111,010,001
 # Superclock: YYYY-MM-DD HH:MM;superclock;dart_sequence_per_round;C|F
 # Superclock rounds use 0/1/2/3 per dart, e.g. 020,103,11
+# Bullgame: YYYY-MM-DD HH:MM;bullgame;round_code,...
+# Bullgame rounds use three digits: first dart 0/1/2 for miss/25/50.
+# If the first dart is 1 or 2, darts two and three use 0/1/2 for miss/25/50.
+# If the first dart is 0, dart two is triple 0/1 and dart three is double 0/1.
 # Checkout run: YYYY-MM-DD HH:MM;checkout121|checkout61;best_run
 # D = double attempts
 """
@@ -245,6 +250,53 @@ def aggregate_clock_stats(legs):
         "segment_percent": percent(segment_hits, segment_attempts),
         "twenty_five_percent": percent(twenty_five_hits, twenty_five_attempts),
         "bull_percent": percent(bull_hits, bull_attempts),
+    }
+
+
+def bullgame_round_stats(rounds):
+    bull_attempts = 0
+    bull_hits = 0
+    fifty_hits = 0
+    triple_attempts = 0
+    triple_hits = 0
+    double_attempts = 0
+    double_hits = 0
+
+    for code in rounds:
+        first, second, third = code
+        bull_attempts += 1
+        if first in "12":
+            bull_hits += 1
+            fifty_hits += first == "2"
+            bull_attempts += 2
+            bull_hits += (second in "12") + (third in "12")
+            fifty_hits += (second == "2") + (third == "2")
+        else:
+            triple_attempts += 1
+            triple_hits += second == "1"
+            double_attempts += 1
+            double_hits += third == "1"
+
+    return {
+        "bull_attempts": bull_attempts,
+        "bull_hits": bull_hits,
+        "fifty_hits": fifty_hits,
+        "triple_attempts": triple_attempts,
+        "triple_hits": triple_hits,
+        "double_attempts": double_attempts,
+        "double_hits": double_hits,
+        "darts": len(rounds) * 3,
+    }
+
+
+def aggregate_bullgame_stats(rounds):
+    stats = bullgame_round_stats(rounds)
+    return {
+        "rounds": len(rounds),
+        "bull_percent": percent(stats["bull_hits"], stats["bull_attempts"]),
+        "fifty_percent": percent(stats["fifty_hits"], stats["bull_attempts"]),
+        "triple_percent": percent(stats["triple_hits"], stats["triple_attempts"]),
+        "double_percent": percent(stats["double_hits"], stats["double_attempts"]),
     }
 
 
@@ -575,6 +627,58 @@ class CheckoutRunGame:
             append_stats_line(player.stats_file, line)
 
 
+class BullGame:
+    def __init__(self, names):
+        self.players = [Player(name, 0) for name in names]
+        self.current = 0
+        self.history = []
+
+    def current_player(self):
+        return self.players[self.current]
+
+    def next_player(self):
+        self.current = (self.current + 1) % len(self.players)
+
+    def current_target(self, player=None):
+        return len((player or self.current_player()).clock_darts)
+
+    def identify_current_player(self, code):
+        name, stats_file = PLAYER_IDENTITIES[code]
+        if any(player.stats_file == stats_file for player in self.players):
+            return f"{name} is already assigned"
+        player = self.current_player()
+        player.name = name
+        player.stats_file = stats_file
+        return f"Player assigned as {name}"
+
+    def add_round(self, code):
+        if len(code) != 3 or code[0] not in "012" or any(dart not in "012" for dart in code[1:]):
+            return "Enter exactly 3 digits"
+        if code[0] == "0" and (code[1] not in "01" or code[2] not in "01"):
+            return "After 0, use 0/1 for triple and double"
+
+        old_player = self.current
+        player = self.current_player()
+        player.clock_darts.append(code)
+        self.history.append(old_player)
+        self.next_player()
+        return f"{player.name}: {code}"
+
+    def undo(self):
+        if not self.history:
+            return None
+        player_index = self.history.pop()
+        player = self.players[player_index]
+        player.clock_darts.pop()
+        self.current = player_index
+        return "Undid round"
+
+    def save_completed_leg(self, checkout_darts=None):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        for player in self.players:
+            if player.stats_file and player.clock_darts:
+                rounds = ",".join(player.clock_darts)
+                append_stats_line(player.stats_file, f"{timestamp};bullgame;{rounds}\n")
 class ClockGame:
     def __init__(self, names, stats_game_type="clock"):
         self.players = [Player(name, 0) for name in names]
@@ -754,6 +858,7 @@ def load_player_stats(stats_filename):
     x01_legs = []
     clock_legs = []
     superclock_legs = []
+    bullgame_rounds = []
     checkout_121_runs = []
     checkout_61_runs = []
 
@@ -776,6 +881,17 @@ def load_player_stats(stats_filename):
                     checkout_121_runs.append(best_run)
                 else:
                     checkout_61_runs.append(best_run)
+            elif game_type == "bullgame":
+                rounds = [value for value in parts[2].split(",") if value]
+                if any(
+                    len(code) != 3
+                    or code[0] not in "012"
+                    or any(dart not in "012" for dart in code[1:])
+                    or (code[0] == "0" and any(dart not in "01" for dart in code[1:]))
+                    for code in rounds
+                ):
+                    continue
+                bullgame_rounds.extend(rounds)
             elif game_type in {"clock", "superclock"}:
                 rounds = [value for value in parts[2].split(",") if value]
                 result = parts[3]
@@ -834,6 +950,7 @@ def load_player_stats(stats_filename):
     stats_301 = aggregate_x01_stats([leg for leg in x01_legs if leg["start_score"] == 301])
     clock_stats = aggregate_clock_stats(clock_legs)
     superclock_stats = aggregate_clock_stats(superclock_legs)
+    bullgame_stats = aggregate_bullgame_stats(bullgame_rounds)
 
     return {
         "legs": stats_501["legs"],
@@ -882,6 +999,11 @@ def load_player_stats(stats_filename):
         "checkout_61_best": max(checkout_61_runs, default=0),
         "checkout_121_average": sum(checkout_121_runs) / len(checkout_121_runs) if checkout_121_runs else 0,
         "checkout_61_average": sum(checkout_61_runs) / len(checkout_61_runs) if checkout_61_runs else 0,
+        "bullgame_rounds": bullgame_stats["rounds"],
+        "bullgame_bull_percent": bullgame_stats["bull_percent"],
+        "bullgame_fifty_percent": bullgame_stats["fifty_percent"],
+        "bullgame_triple_percent": bullgame_stats["triple_percent"],
+        "bullgame_double_percent": bullgame_stats["double_percent"],
     }
 
 
@@ -909,6 +1031,31 @@ def reset_to_start():
     stats_player_index = 0
     stats_page = 0
 
+def replay_game():
+    global game, current_input, message, checkout_darts, state
+
+    names = [player.name for player in game.players]
+    old_players = game.players
+    if selected_game in X01_GAMES:
+        game = DartGame(names, start_score=int(selected_game))
+    elif selected_game == "clock":
+        game = ClockGame(names)
+    elif selected_game == "superclock":
+        game = SuperClockGame(names)
+    elif selected_game == "checkout121":
+        game = CheckoutRunGame(names, 121, "checkout121")
+    elif selected_game == "checkout61":
+        game = CheckoutRunGame(names, 61, "checkout61")
+    elif selected_game == BULLGAME:
+        game = BullGame(names)
+
+    for new_player, old_player in zip(game.players, old_players):
+        new_player.stats_file = old_player.stats_file
+
+    current_input = ""
+    message = ""
+    checkout_darts = None
+    state = STATE_PLAYING
 
 # ---------- Pygame ----------
 pygame.init()
@@ -986,6 +1133,12 @@ while running:
                 toggle_fullscreen()
 
             elif event.key == pygame.K_ESCAPE:
+                if state == STATE_GAME_OVER or state == STATE_PLAYING and selected_game == BULLGAME:
+                    try:
+                        game.save_completed_leg(checkout_darts)
+                    except OSError:
+                        message = 'Could not save stats'
+                        continue
                 reset_to_start()
 
             elif state == STATE_START:
@@ -1009,6 +1162,8 @@ while running:
                         game = CheckoutRunGame(names, 121, "checkout121")
                     elif selected_game == "checkout61":
                         game = CheckoutRunGame(names, 61, "checkout61")
+                    elif selected_game == BULLGAME:
+                        game = BullGame(names)
                     current_input = ""
                     message = ""
                     state = STATE_PLAYING
@@ -1042,6 +1197,10 @@ while running:
                     state = STATE_PLAYER_COUNT
 
                 elif event.unicode == "7":
+                    selected_game = BULLGAME
+                    state = STATE_PLAYER_COUNT
+
+                elif event.unicode == "8":
                     stats_player_index = 0
                     stats_page = 0
                     stats_data = load_player_stats(STATS_PLAYERS[stats_player_index][1])
@@ -1050,7 +1209,7 @@ while running:
             elif state == STATE_STATS:
                 if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                     stats_page += 1
-                    if stats_page >= 2:
+                    if stats_page >= 3:
                         stats_page = 0
                         stats_player_index = (stats_player_index + 1) % len(STATS_PLAYERS)
                     stats_data = load_player_stats(STATS_PLAYERS[stats_player_index][1])
@@ -1070,6 +1229,14 @@ while running:
                             reset_to_start()
 
                 elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                    if selected_game == BULLGAME and not current_input:
+                        try:
+                            game.save_completed_leg()
+                            reset_to_start()
+                        except OSError:
+                            message = "Could not save stats"
+                        continue
+
                     submitted_input = current_input or "0"
 
                     if current_input and submitted_input in PLAYER_IDENTITIES:
@@ -1089,6 +1256,8 @@ while running:
                                     message = game.add_hits(int(submitted_input))
                             elif selected_game == "superclock":
                                 message = game.add_dart_sequence(submitted_input)
+                            elif selected_game == BULLGAME:
+                                message = game.add_round(submitted_input)
                             elif selected_game in CHECKOUT_RUN_GAMES:
                                 points, _ = parse_score_input(submitted_input)
                                 message = game.add_score(points)
@@ -1155,7 +1324,7 @@ while running:
                 elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                     try:
                         game.save_completed_leg(checkout_darts)
-                        reset_to_start()
+                        replay_game()
                     except OSError:
                         message = "Could not save stats"
 
@@ -1190,7 +1359,8 @@ while running:
         option4 = medium_font.render("4. Superclock", True, (200, 255, 200))
         option5 = medium_font.render("5. 121 Checkout", True, (200, 255, 200))
         option6 = medium_font.render("6. 61 Checkout", True, (200, 255, 200))
-        option7 = medium_font.render("7. Stats", True, (180, 220, 255))
+        option7 = medium_font.render("7. Bullgame", True, (200, 255, 200))
+        option8 = medium_font.render("8. Stats", True, (180, 220, 255))
 
         screen.blit(title, (380, 105))
         screen.blit(option1, (380, 170))
@@ -1200,10 +1370,11 @@ while running:
         screen.blit(option5, (380, 350))
         screen.blit(option6, (380, 395))
         screen.blit(option7, (380, 440))
+        screen.blit(option8, (380, 485))
 
     elif state == STATE_STATS:
         stats_player_name = STATS_PLAYERS[stats_player_index][0]
-        page_title = "x01" if stats_page == 0 else "Clock"
+        page_title = "x01" if stats_page == 0 else ("Clock" if stats_page == 1 else "Bullgame")
         title = medium_font.render(f"{stats_player_name}'s {page_title} stats", True, (255, 255, 255))
         screen.blit(title, (335, 35))
 
@@ -1237,7 +1408,7 @@ while running:
                 ("Highest checkout", stats_data["301_highest_checkout"] or "-"),
                 ("6-darters", stats_data["301_six_darters"]),
             ]
-        else:
+        elif stats_page == 1:
             left_stats = [
                 ("Clock", ""),
                 ("Played", stats_data["clock_legs"]),
@@ -1255,6 +1426,18 @@ while running:
                 ("1-20 hit", f'{stats_data["superclock_segment_percent"]:.1f}%'),
                 ("25 hit", f'{stats_data["superclock_25_percent"]:.1f}%'),
                 ("BULL hit", f'{stats_data["superclock_bull_percent"]:.1f}%'),
+            ]
+        else:
+            left_stats = [
+                ("Bullgame", ""),
+                ("Rounds", stats_data["bullgame_rounds"]),
+                ("Bull area", f'{stats_data["bullgame_bull_percent"]:.1f}%'),
+                ("50 / bull area", f'{stats_data["bullgame_fifty_percent"]:.1f}%'),
+            ]
+            right_stats = [
+                ("After first miss", ""),
+                ("Triple", f'{stats_data["bullgame_triple_percent"]:.1f}%'),
+                ("Double", f'{stats_data["bullgame_double_percent"]:.1f}%'),
             ]
 
         for column_x, rows in ((80, left_stats), (540, right_stats)):
@@ -1309,6 +1492,12 @@ while running:
                 for route_index, route in enumerate(routes[:2]):
                     route_text = small_font.render(format_route(route), True, (200, 255, 200))
                     screen.blit(route_text, (725, 75 + route_index * 35))
+        elif selected_game == BULLGAME:
+            rounds = len(player.clock_darts)
+            score_text = big_font.render(str(rounds), True, (255, 255, 255))
+            hint_text = small_font.render("Enter 3 digits: bull 0/1/2; after 0 use triple/double 0/1", True, (200, 200, 200))
+            screen.blit(score_text, (420, 150))
+            screen.blit(hint_text, (250, 290))
         elif selected_game in CHECKOUT_RUN_GAMES:
             target_text = medium_font.render(f"Target: {player.checkout_target}", True, (255, 255, 255))
             score_text = big_font.render(str(player.score), True, (255, 255, 255))
@@ -1345,13 +1534,13 @@ while running:
         title = medium_font.render(prompt, True, (255, 255, 255))
         hint = medium_font.render("Press 1, 2 or 3", True, (200, 200, 200))
 
-        screen.blit(title, (220, 220))  
+        screen.blit(title, (220, 220))
         screen.blit(hint, (320, 310))
-        
+
     elif state == STATE_GAME_OVER:
         title = medium_font.render(message, True, (255, 255, 255))
         extra = medium_font.render(game_over_summary(game, selected_game, checkout_darts), True, (200, 255, 200))
-        hint = medium_font.render("Enter saves, Backspace edits", True, (200, 200, 200))
+        hint = medium_font.render("ESC FOR EXIT   ENTER FOR REPLAY   BACKSPACE TO EDIT", True, (200, 200, 200))
 
         screen.blit(title, (330, 190))
         screen.blit(extra, (330, 270))
